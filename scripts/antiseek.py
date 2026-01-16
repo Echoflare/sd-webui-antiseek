@@ -77,12 +77,9 @@ def hook_http_request(app: FastAPI):
             if ext in ['.png', '.jpg', '.jpeg', '.webp', '.bmp']:
                 try:
                     image = PILImage.open(file_path)
-                    pnginfo = image.info or {}
                     
-                    if 's_tag' in pnginfo:
-                        seed = int(pnginfo['s_tag'])
-                        decrypted_image = process_image(image, seed)
-                        
+                    if getattr(image, '_is_decrypted', False):
+                        pnginfo = image.info or {}
                         buffered = BytesIO()
                         
                         target_format = getattr(shared.opts, 'antiseek_preview_format', 'png').lower()
@@ -96,8 +93,8 @@ def hook_http_request(app: FastAPI):
                             media_type = "image/jpeg"
                             pil_format = "JPEG"
                             save_kwargs['quality'] = target_quality
-                            if decrypted_image.mode in ('RGBA', 'LA'):
-                                decrypted_image = decrypted_image.convert('RGB')
+                            if image.mode in ('RGBA', 'LA'):
+                                image = image.convert('RGB')
                         elif target_format == 'webp':
                             media_type = "image/webp"
                             pil_format = "WEBP"
@@ -109,7 +106,7 @@ def hook_http_request(app: FastAPI):
                                     info.add_text(key, str(pnginfo[key]))
                             save_kwargs['pnginfo'] = info
 
-                        decrypted_image.save(buffered, format=pil_format, **save_kwargs)
+                        image.save(buffered, format=pil_format, **save_kwargs)
                         return Response(content=buffered.getvalue(), media_type=media_type)
                 except:
                     pass
@@ -204,6 +201,7 @@ if PILImage.Image.__name__ != 'AntiSeekImage':
                 
                 decrypted.info = pnginfo_clean
                 image = AntiSeekImage.from_image(image=decrypted)
+                image._is_decrypted = True
                 return image
             except:
                 pass
