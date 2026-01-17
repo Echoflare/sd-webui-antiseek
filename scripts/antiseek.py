@@ -15,6 +15,12 @@ import gradio as gr
 import sys
 from urllib.parse import unquote
 
+try:
+    import piexif
+    import piexif._exceptions
+except ImportError:
+    piexif = None
+
 repo_dir = md_scripts.basedir()
 
 def on_ui_settings():
@@ -24,9 +30,9 @@ def on_ui_settings():
         "antiseek_preview_format",
         shared.OptionInfo(
             "png", "Frontend Preview/API Format / 前端预览及API格式",
-            gr.Dropdown, lambda: {"choices": ["png", "jpeg", "webp"]},
+            gr.Dropdown, lambda: {"choices": ["png", "jpeg", "webp", "avif"]},
             section=section
-        )
+        ).info("Warning: Non-PNG formats will cause metadata (GenInfo) loss in preview/API. / 警告：非 PNG 格式会导致预览或 API 返回的图片丢失元数据。")
     )
     
     shared.opts.add_option(
@@ -35,7 +41,7 @@ def on_ui_settings():
             90, "Preview Compression Quality / 预览压缩质量",
             gr.Slider, {"minimum": 10, "maximum": 100, "step": 1},
             section=section
-        ).info("Only valid when JPEG or WEBP is selected. / 仅当选择 JPEG 或 WEBP 时有效。")
+        ).info("Valid for JPEG/WEBP/AVIF. 100 triggers lossless for WEBP. / 适用于 JPEG/WEBP/AVIF。WEBP 设置为 100 时启用无损压缩。")
     )
 
 def hook_http_request(app: FastAPI):
@@ -74,7 +80,7 @@ def hook_http_request(app: FastAPI):
             if file_path.rfind('.') == -1: return await call_next(req)
             
             ext = file_path[file_path.rfind('.'):].lower()
-            if ext in ['.png', '.jpg', '.jpeg', '.webp', '.bmp']:
+            if ext in ['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.avif']:
                 try:
                     image = PILImage.open(file_path)
                     
@@ -98,6 +104,12 @@ def hook_http_request(app: FastAPI):
                         elif target_format == 'webp':
                             media_type = "image/webp"
                             pil_format = "WEBP"
+                            save_kwargs['quality'] = target_quality
+                            if target_quality >= 100:
+                                save_kwargs['lossless'] = True
+                        elif target_format == 'avif':
+                            media_type = "image/avif"
+                            pil_format = "AVIF"
                             save_kwargs['quality'] = target_quality
                         else:
                             info = PngImagePlugin.PngInfo()
@@ -225,12 +237,30 @@ if PILImage.Image.__name__ != 'AntiSeekImage':
                     image = image.convert('RGB')
                 image.save(output_bytes, format="JPEG", quality=target_quality)
             elif target_format == 'webp':
-                image.save(output_bytes, format="WEBP", quality=target_quality)
+                save_args = {"quality": target_quality}
+                if target_quality >= 100:
+                    save_args['lossless'] = True
+                image.save(output_bytes, format="WEBP", **save_args)
+            elif target_format == 'avif':
+                image.save(output_bytes, format="AVIF", quality=target_quality)
             else:
                 image.save(output_bytes, format="PNG", quality=opts.jpeg_quality)
             
             bytes_data = output_bytes.getvalue()
         return base64.b64encode(bytes_data)
+
+    if piexif:
+        _original_piexif_insert = piexif.insert
+        
+        def _antiseek_piexif_insert(exif, image, **kwargs):
+            try:
+                _original_piexif_insert(exif, image, **kwargs)
+            except piexif.InvalidImageDataError:
+                pass
+            except Exception:
+                raise
+
+        piexif.insert = _antiseek_piexif_insert
   
     PILImage.Image = AntiSeekImage
     PILImage.open = open
