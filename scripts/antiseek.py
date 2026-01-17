@@ -1,10 +1,11 @@
 import base64
 import io
+import random
 from pathlib import Path
 from modules import shared, script_callbacks, scripts as md_scripts, images
 from modules.api import api
 from modules.shared import opts
-from scripts.core.core import process_image, get_random_seed
+from scripts.core.core import process_image, get_random_seed, mix_seed, get_image_hash, generate_fake_image
 from PIL import PngImagePlugin, _util, ImagePalette
 from PIL import Image as PILImage
 from io import BytesIO
@@ -43,6 +44,24 @@ def on_ui_settings():
             gr.Slider, {"minimum": 10, "maximum": 100, "step": 1},
             section=section
         ).info("Valid for JPEG/WEBP/AVIF. 100 triggers lossless for WEBP. / 适用于 JPEG/WEBP/AVIF。WEBP 设置为 100 时启用无损压缩。")
+    )
+
+    shared.opts.add_option(
+        "antiseek_salt",
+        shared.OptionInfo(
+            "", "Security Salt / 安全加盐",
+            gr.Textbox,
+            section=section
+        ).info("Optional string to salt the random seed. / 可选字符串，用于混淆种子。")
+    )
+
+    shared.opts.add_option(
+        "antiseek_keyname",
+        shared.OptionInfo(
+            "s_tag", "Metadata Key Name / 元数据键名",
+            gr.Textbox,
+            section=section
+        ).info("The key name used to store the seed in metadata. Default: s_tag / 用于存储种子的元数据键名。默认：s_tag")
     )
 
 def hook_http_request(app: FastAPI):
@@ -85,7 +104,7 @@ def hook_http_request(app: FastAPI):
                 try:
                     image = PILImage.open(file_path)
                     
-                    if getattr(image, '_is_decrypted', False):
+                    if getattr(image, '_is_decrypted', False) or getattr(image, '_is_fake', False):
                         pnginfo = image.info or {}
                         buffered = BytesIO()
                         
@@ -115,7 +134,7 @@ def hook_http_request(app: FastAPI):
                         else:
                             info = PngImagePlugin.PngInfo()
                             for key in pnginfo.keys():
-                                if key != 's_tag' and pnginfo[key]:
+                                if key not in [getattr(shared.opts, 'antiseek_keyname', 's_tag'), 'e_info'] and pnginfo[key]:
                                     info.add_text(key, str(pnginfo[key]))
                             save_kwargs['pnginfo'] = info
 
@@ -181,14 +200,19 @@ if PILImage.Image.__name__ != 'AntiSeekImage':
                 super().save(fp, format=format, **params)
                 return
 
-            if 's_tag' in self.info:
+            if 'e_info' in self.info:
                 super().save(fp, format=format, **params)
                 return
 
             back_img = self.copy()
             
+            orig_hash = get_image_hash(self)
             seed = get_random_seed()
-            encrypted = process_image(self, seed)
+            salt = getattr(shared.opts, 'antiseek_salt', '')
+            key_name = getattr(shared.opts, 'antiseek_keyname', 's_tag') or 's_tag'
+            
+            eff_seed = mix_seed(seed, salt)
+            encrypted = process_image(self, eff_seed)
             self.paste(encrypted)
             
             global total_encrypted_count
@@ -202,7 +226,8 @@ if PILImage.Image.__name__ != 'AntiSeekImage':
                     if self.info[key]:
                         pnginfo.add_text(key, str(self.info[key]))
             
-            pnginfo.add_text('s_tag', str(seed))
+            pnginfo.add_text(key_name, str(seed))
+            pnginfo.add_text('e_info', orig_hash)
             params.update(pnginfo=pnginfo)
             
             super().save(fp, format=self.format, **params)
@@ -212,31 +237,66 @@ if PILImage.Image.__name__ != 'AntiSeekImage':
     def open(fp, *args, **kwargs):
         image = super_open(fp, *args, **kwargs)
         pnginfo = image.info or {}
-        if 's_tag' in pnginfo:
+        
+        if 'e_info' in pnginfo:
             try:
-                seed = int(pnginfo['s_tag'])
-                decrypted = process_image(image, seed)
+                key_name = getattr(shared.opts, 'antiseek_keyname', 's_tag') or 's_tag'
+                salt = getattr(shared.opts, 'antiseek_salt', '')
                 
-                pnginfo_clean = image.info.copy()
-                del pnginfo_clean['s_tag']
+                if key_name in pnginfo:
+                    seed = int(pnginfo[key_name])
+                    eff_seed = mix_seed(seed, salt)
+                    decrypted = process_image(image, eff_seed)
+                    
+                    check_hash = get_image_hash(decrypted)
+                    
+                    if check_hash == pnginfo['e_info']:
+                        pnginfo_clean = image.info.copy()
+                        if key_name in pnginfo_clean: del pnginfo_clean[key_name]
+                        if 'e_info' in pnginfo_clean: del pnginfo_clean['e_info']
+                        
+                        decrypted.info = pnginfo_clean
+                        image = AntiSeekImage.from_image(image=decrypted)
+                        image._is_decrypted = True
+                        return image
                 
-                decrypted.info = pnginfo_clean
-                image = AntiSeekImage.from_image(image=decrypted)
-                image._is_decrypted = True
+                fake_img = generate_fake_image(image.width, image.height)
+                fake_img.info = image.info
+                image = AntiSeekImage.from_image(image=fake_img)
+                image._is_fake = True
                 return image
+                
             except:
-                pass
+                fake_img = generate_fake_image(image.width, image.height)
+                fake_img.info = image.info
+                image = AntiSeekImage.from_image(image=fake_img)
+                image._is_fake = True
+                return image
+                
         return AntiSeekImage.from_image(image=image)
     
     def encode_pil_to_base64(image: PILImage.Image):
         with io.BytesIO() as output_bytes:
             pnginfo = image.info or {}
             
-            if 's_tag' in pnginfo:
+            if 'e_info' in pnginfo:
                 try:
-                    seed = int(pnginfo['s_tag'])
-                    image = process_image(image, seed)
-                except: pass
+                    key_name = getattr(shared.opts, 'antiseek_keyname', 's_tag') or 's_tag'
+                    salt = getattr(shared.opts, 'antiseek_salt', '')
+                    
+                    if key_name in pnginfo:
+                        seed = int(pnginfo[key_name])
+                        eff_seed = mix_seed(seed, salt)
+                        decrypted = process_image(image, eff_seed)
+                        
+                        if get_image_hash(decrypted) == pnginfo['e_info']:
+                            image = decrypted
+                        else:
+                            image = generate_fake_image(image.width, image.height)
+                    else:
+                        image = generate_fake_image(image.width, image.height)
+                except: 
+                     image = generate_fake_image(image.width, image.height)
             
             target_format = getattr(shared.opts, 'antiseek_preview_format', 'png').lower()
             target_quality = int(getattr(shared.opts, 'antiseek_preview_quality', 90))
@@ -277,4 +337,41 @@ if PILImage.Image.__name__ != 'AntiSeekImage':
 
 script_callbacks.on_ui_settings(on_ui_settings)
 script_callbacks.on_app_started(app_started_callback)
-print('Anti-Seek Plugin Active! 图像潜影插件启用！')
+
+def print_obfuscated(msg):
+    charmap = {
+        'A': ['Α', 'А', 'Ａ'],
+        'n': ['ｎ', 'η', 'ո', 'и'],
+        't': ['ｔ', 'τ', '†', 'т'],
+        'i': ['ｉ', '¡', 'í'],
+        'S': ['Ｓ', 'Ѕ', '§'],
+        'e': ['ｅ', 'е', 'є', 'é'],
+        'k': ['ｋ', 'κ', 'к'],
+        'P': ['Ｐ', 'Ρ', 'Р', 'Þ'],
+        'l': ['ｌ', 'ǀ', '1', 'I'],
+        'u': ['ｕ', 'υ', 'μ'],
+        'g': ['ｇ', 'ɡ'],
+        'c': ['ｃ', 'с', 'ς'],
+        'v': ['ｖ', 'ν'],
+        'T': ['Ｔ', 'Τ', 'Т'],
+        'X': ['Ｘ', 'Χ', 'Х'],
+        'Y': ['Ｙ', 'Υ'],
+        '-': ['－', '—', 'ㄧ', '–'],
+        '!': ['！', 'ǃ', '‼'],
+        ' ': ['\u2000', '\u2002', '\u3000', '\u2009']
+    }
+    invisible = ['\u200b', '\u200c', '\u200d', '\u2060', '\uFEFF']
+    out = []
+    for char in msg:
+        if char in charmap and random.random() > 0.15:
+            c = random.choice(charmap[char])
+        elif '!' <= char <= '~' and random.random() > 0.4:
+            c = chr(ord(char) + 0xFEE0)
+        else:
+            c = char
+        out.append(c)
+        for _ in range(random.randint(0, 5)):
+            out.append(random.choice(invisible))
+    print("".join(out))
+
+print_obfuscated('Anti-Seek Plugin Active!')
