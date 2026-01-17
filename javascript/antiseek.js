@@ -33,24 +33,26 @@ onUiUpdate(function () {
 
   var format = "png";
   var quality = 90;
+  var salt = "禁用";
+  var keyname = "s_tag";
 
   if (typeof opts !== "undefined") {
     if (opts.antiseek_preview_format) format = opts.antiseek_preview_format;
     if (opts.antiseek_preview_quality) quality = opts.antiseek_preview_quality;
+    if (opts.antiseek_salt && opts.antiseek_salt.trim() !== "") salt = opts.antiseek_salt;
+    if (opts.antiseek_keyname) keyname = opts.antiseek_keyname;
   }
 
-  var infoText = `传输格式: ${format.toUpperCase()}`;
+  var formatText = format.toUpperCase();
   
   if (format !== 'png') {
-    infoText += ` (${quality})`;
+    formatText += ` (${quality})`;
     if (format === 'webp' && quality >= 100) {
-        infoText += " [Lossless]";
+        formatText += " [Lossless]";
     }
   }
 
-  infoText += ` | 已加密: ${window.antiseek_cached_count}`;
-
-  var finalHTML = `<span>已加载 图像潜影 (Anti-Seek) | ${infoText}</span>`;
+  var finalHTML = `<span>Anti-Seek: 安全加盐: ${salt} | 元数据键名: ${keyname} | 传输格式: ${formatText} | 已加密: ${window.antiseek_cached_count}</span>`;
   
   if (infoBox.innerHTML !== finalHTML) {
     infoBox.innerHTML = finalHTML;

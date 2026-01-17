@@ -23,11 +23,13 @@ except ImportError:
     piexif = None
 
 repo_dir = md_scripts.basedir()
-total_encrypted_count = 0
+
+if not hasattr(shared, 'antiseek_count'):
+    shared.antiseek_count = 0
 
 def on_ui_settings():
     section = ('antiseek', 'Anti-Seek (图像潜影)')
-    
+
     shared.opts.add_option(
         "antiseek_preview_format",
         shared.OptionInfo(
@@ -36,7 +38,7 @@ def on_ui_settings():
             section=section
         ).info("Warning: Non-PNG formats will cause metadata (GenInfo) loss in preview/API. / 警告：非 PNG 格式会导致预览或 API 返回的图片丢失元数据。")
     )
-    
+
     shared.opts.add_option(
         "antiseek_preview_quality",
         shared.OptionInfo(
@@ -69,7 +71,7 @@ def hook_http_request(app: FastAPI):
     async def image_decrypt_middleware(req: Request, call_next):
         endpoint: str = req.scope.get('path', 'err')
         endpoint = '/' + endpoint.strip('/')
-        
+
         if endpoint.startswith('/infinite_image_browsing/image-thumbnail') or endpoint.startswith('/infinite_image_browsing/file'):
             query_string: str = req.scope.get('query_string', b'').decode('utf-8')
             query_string = unquote(query_string)
@@ -148,17 +150,17 @@ def hook_http_request(app: FastAPI):
 def app_started_callback(_: Blocks, app: FastAPI):
     app.middleware_stack = None
     hook_http_request(app)
-    
+
     def get_encrypted_count():
-        return {"count": total_encrypted_count}
-    
+        return {"count": getattr(shared, 'antiseek_count', 0)}
+
     app.add_api_route("/antiseek/count", get_encrypted_count, methods=["GET"])
     app.build_middleware_stack()
 
-if PILImage.Image.__name__ != 'AntiSeekImage':
+if getattr(PILImage.Image, '__name__', '') != 'AntiSeekImage':
     super_open = PILImage.open
     super_encode_pil_to_base64 = api.encode_pil_to_base64
-    
+
     class AntiSeekImage(PILImage.Image):
         __name__ = "AntiSeekImage"
         
@@ -215,8 +217,10 @@ if PILImage.Image.__name__ != 'AntiSeekImage':
             encrypted = process_image(self, eff_seed)
             self.paste(encrypted)
             
-            global total_encrypted_count
-            total_encrypted_count += 1
+            if hasattr(shared, 'antiseek_count'):
+                shared.antiseek_count += 1
+            else:
+                shared.antiseek_count = 1
             
             self.format = PngImagePlugin.PngImageFile.format
             pnginfo = params.get('pnginfo', PngImagePlugin.PngInfo())
@@ -274,7 +278,7 @@ if PILImage.Image.__name__ != 'AntiSeekImage':
                 return image
                 
         return AntiSeekImage.from_image(image=image)
-    
+
     def encode_pil_to_base64(image: PILImage.Image):
         with io.BytesIO() as output_bytes:
             pnginfo = image.info or {}
@@ -330,7 +334,7 @@ if PILImage.Image.__name__ != 'AntiSeekImage':
                 raise
 
         piexif.insert = _antiseek_piexif_insert
-  
+
     PILImage.Image = AntiSeekImage
     PILImage.open = open
     api.encode_pil_to_base64 = encode_pil_to_base64
@@ -340,25 +344,25 @@ script_callbacks.on_app_started(app_started_callback)
 
 def print_obfuscated(msg):
     charmap = {
-        'A': ['Α', 'А', 'Ａ'],
-        'n': ['ｎ', 'η', 'ո', 'и'],
-        't': ['ｔ', 'τ', '†', 'т'],
-        'i': ['ｉ', '¡', 'í'],
-        'S': ['Ｓ', 'Ѕ', '§'],
-        'e': ['ｅ', 'е', 'є', 'é'],
-        'k': ['ｋ', 'κ', 'к'],
-        'P': ['Ｐ', 'Ρ', 'Р', 'Þ'],
-        'l': ['ｌ', 'ǀ', '1', 'I'],
-        'u': ['ｕ', 'υ', 'μ'],
-        'g': ['ｇ', 'ɡ'],
-        'c': ['ｃ', 'с', 'ς'],
-        'v': ['ｖ', 'ν'],
-        'T': ['Ｔ', 'Τ', 'Т'],
-        'X': ['Ｘ', 'Χ', 'Х'],
-        'Y': ['Ｙ', 'Υ'],
-        '-': ['－', '—', 'ㄧ', '–'],
-        '!': ['！', 'ǃ', '‼'],
-        ' ': ['\u2000', '\u2002', '\u3000', '\u2009']
+    'A': ['Α', 'А', 'Ａ'],
+    'n': ['ｎ', 'η', 'ո', 'и'],
+    't': ['ｔ', 'τ', '†', 'т'],
+    'i': ['ｉ', '¡', 'í'],
+    'S': ['Ｓ', 'Ѕ', '§'],
+    'e': ['ｅ', 'е', 'є', 'é'],
+    'k': ['ｋ', 'κ', 'к'],
+    'P': ['Ｐ', 'Ρ', 'Р', 'Þ'],
+    'l': ['ｌ', 'ǀ', '1', 'I'],
+    'u': ['ｕ', 'υ', 'μ'],
+    'g': ['ｇ', 'ɡ'],
+    'c': ['ｃ', 'с', 'ς'],
+    'v': ['ｖ', 'ν'],
+    'T': ['Ｔ', 'Τ', 'Т'],
+    'X': ['Ｘ', 'Χ', 'Х'],
+    'Y': ['Ｙ', 'Υ'],
+    '-': ['－', '—', 'ㄧ', '–'],
+    '!': ['！', 'ǃ', '‼'],
+    ' ': ['\u2000', '\u2002', '\u3000', '\u2009']
     }
     invisible = ['\u200b', '\u200c', '\u200d', '\u2060', '\uFEFF']
     out = []
