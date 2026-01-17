@@ -22,6 +22,7 @@ except ImportError:
     piexif = None
 
 repo_dir = md_scripts.basedir()
+total_encrypted_count = 0
 
 def on_ui_settings():
     section = ('antiseek', 'Anti-Seek (图像潜影)')
@@ -128,6 +129,11 @@ def hook_http_request(app: FastAPI):
 def app_started_callback(_: Blocks, app: FastAPI):
     app.middleware_stack = None
     hook_http_request(app)
+    
+    def get_encrypted_count():
+        return {"count": total_encrypted_count}
+    
+    app.add_api_route("/antiseek/count", get_encrypted_count, methods=["GET"])
     app.build_middleware_stack()
 
 if PILImage.Image.__name__ != 'AntiSeekImage':
@@ -184,6 +190,9 @@ if PILImage.Image.__name__ != 'AntiSeekImage':
             seed = get_random_seed()
             encrypted = process_image(self, seed)
             self.paste(encrypted)
+            
+            global total_encrypted_count
+            total_encrypted_count += 1
             
             self.format = PngImagePlugin.PngImageFile.format
             pnginfo = params.get('pnginfo', PngImagePlugin.PngInfo())
