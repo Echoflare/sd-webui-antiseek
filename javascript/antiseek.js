@@ -52,7 +52,7 @@ onUiUpdate(function () {
     }
   }
 
-  var finalHTML = `<span>Anti-Seek: 安全加盐: ${salt} | 元数据键名: ${keyname} | 传输格式: ${formatText} | 已加密: ${window.antiseek_cached_count}</span>`;
+  var finalHTML = `<span><a href="https://github.com/Echoflare/sd-webui-antiseek" target="_blank" style="text-decoration: underline; pointer-events: auto;">Anti-Seek</a>: 安全加盐: ${salt} | 元数据键名: ${keyname} | 传输格式: ${formatText} | 已加密: ${window.antiseek_cached_count}</span>`;
   
   if (infoBox.innerHTML !== finalHTML) {
     infoBox.innerHTML = finalHTML;
