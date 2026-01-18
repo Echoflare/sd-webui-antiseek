@@ -1,6 +1,7 @@
 import base64
 import io
 import random
+import os
 from pathlib import Path
 from modules import shared, script_callbacks, scripts as md_scripts, images
 from modules.api import api
@@ -15,12 +16,8 @@ from gradio import Blocks
 import gradio as gr
 import sys
 from urllib.parse import unquote
-
-try:
-    import piexif
-    import piexif._exceptions
-except ImportError:
-    piexif = None
+import piexif
+import piexif.helper
 
 repo_dir = md_scripts.basedir()
 
@@ -29,24 +26,6 @@ if not hasattr(shared, 'antiseek_count'):
 
 def on_ui_settings():
     section = ('antiseek', 'Anti-Seek (图像潜影)')
-
-    shared.opts.add_option(
-        "antiseek_preview_format",
-        shared.OptionInfo(
-            "png", "Frontend Preview/API Format / 前端预览及API格式",
-            gr.Dropdown, lambda: {"choices": ["png", "jpeg", "webp", "avif"]},
-            section=section
-        ).info("Warning: Non-PNG formats will cause metadata (GenInfo) loss in preview/API. / 警告：非 PNG 格式会导致预览或 API 返回的图片丢失元数据。")
-    )
-
-    shared.opts.add_option(
-        "antiseek_preview_quality",
-        shared.OptionInfo(
-            90, "Preview Compression Quality / 预览压缩质量",
-            gr.Slider, {"minimum": 10, "maximum": 100, "step": 1},
-            section=section
-        ).info("Valid for JPEG/WEBP/AVIF. 100 triggers lossless for WEBP. / 适用于 JPEG/WEBP/AVIF。WEBP 设置为 100 时启用无损压缩。")
-    )
 
     shared.opts.add_option(
         "antiseek_salt",
@@ -65,6 +44,38 @@ def on_ui_settings():
             section=section
         ).info("The key name used to store the seed in metadata. Default: s_tag / 用于存储种子的元数据键名。默认：s_tag")
     )
+
+def get_exif_bytes(pnginfo):
+    exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}, "thumbnail": None}
+    
+    geninfo = ""
+    if pnginfo:
+        for key in pnginfo.keys():
+             if key == "parameters":
+                 geninfo = pnginfo[key]
+                 break
+    
+    if geninfo:
+        user_comment = piexif.helper.UserComment.dump(geninfo, encoding="unicode")
+        exif_dict["Exif"][piexif.ExifIFD.UserComment] = user_comment
+        
+    try:
+        exif_bytes = piexif.dump(exif_dict)
+    except:
+        exif_bytes = b""
+        
+    return exif_bytes
+
+def get_pil_format_from_ext(ext_str):
+    if not ext_str.startswith('.'):
+        ext_str = '.' + ext_str
+    ext_str = ext_str.lower()
+    try:
+        if not PILImage.ID:
+             PILImage.init()
+        return PILImage.registered_extensions().get(ext_str, 'PNG')
+    except:
+        return 'PNG'
 
 def hook_http_request(app: FastAPI):
     @app.middleware("http")
@@ -107,38 +118,46 @@ def hook_http_request(app: FastAPI):
                     image = PILImage.open(file_path)
                     
                     if getattr(image, '_is_decrypted', False) or getattr(image, '_is_fake', False):
-                        pnginfo = image.info or {}
+                        pnginfo_dict = image.info or {}
                         buffered = BytesIO()
                         
-                        target_format = getattr(shared.opts, 'antiseek_preview_format', 'png').lower()
-                        target_quality = int(getattr(shared.opts, 'antiseek_preview_quality', 90))
+                        target_ext = pnginfo_dict.get('as_fmt', 'png')
+                        pil_format = get_pil_format_from_ext(target_ext)
+                        target_quality = int(pnginfo_dict.get('as_q', 90))
+                        target_lossless = pnginfo_dict.get('as_l', 'False') == 'True'
                         
+                        media_type = f"image/{target_ext if target_ext != 'jpg' else 'jpeg'}"
                         save_kwargs = {}
-                        media_type = "image/png"
-                        pil_format = "PNG"
 
-                        if target_format == 'jpeg':
+                        if pil_format == 'JPEG':
                             media_type = "image/jpeg"
-                            pil_format = "JPEG"
                             save_kwargs['quality'] = target_quality
                             if image.mode in ('RGBA', 'LA'):
                                 image = image.convert('RGB')
-                        elif target_format == 'webp':
+                            save_kwargs['exif'] = get_exif_bytes(pnginfo_dict)
+                            
+                        elif pil_format == 'WEBP':
                             media_type = "image/webp"
-                            pil_format = "WEBP"
                             save_kwargs['quality'] = target_quality
-                            if target_quality >= 100:
+                            if target_lossless:
                                 save_kwargs['lossless'] = True
-                        elif target_format == 'avif':
+                            save_kwargs['exif'] = get_exif_bytes(pnginfo_dict)
+                            
+                        elif pil_format == 'AVIF':
                             media_type = "image/avif"
-                            pil_format = "AVIF"
                             save_kwargs['quality'] = target_quality
-                        else:
+                            save_kwargs['exif'] = get_exif_bytes(pnginfo_dict)
+                            
+                        elif pil_format == 'PNG':
+                            media_type = "image/png"
                             info = PngImagePlugin.PngInfo()
-                            for key in pnginfo.keys():
-                                if key not in [getattr(shared.opts, 'antiseek_keyname', 's_tag'), 'e_info'] and pnginfo[key]:
-                                    info.add_text(key, str(pnginfo[key]))
+                            for key in pnginfo_dict.keys():
+                                if key not in [getattr(shared.opts, 'antiseek_keyname', 's_tag'), 'e_info', 'as_fmt', 'as_q', 'as_l'] and pnginfo_dict[key]:
+                                    info.add_text(key, str(pnginfo_dict[key]))
                             save_kwargs['pnginfo'] = info
+                        else:
+                            pil_format = "PNG"
+                            media_type = "image/png"
 
                         image.save(buffered, format=pil_format, **save_kwargs)
                         return Response(content=buffered.getvalue(), media_type=media_type)
@@ -230,6 +249,18 @@ if getattr(PILImage.Image, '__name__', '') != 'AntiSeekImage':
                     if self.info[key]:
                         pnginfo.add_text(key, str(self.info[key]))
             
+            fname_str = os.path.basename(filename)
+            target_fmt = getattr(shared.opts, 'samples_format', 'png')
+            
+            if fname_str.startswith('grid-'):
+                 target_fmt = getattr(shared.opts, 'grid_format', 'png')
+            
+            if not target_fmt: target_fmt = 'png'
+            
+            pnginfo.add_text('as_fmt', str(target_fmt))
+            pnginfo.add_text('as_q', str(getattr(shared.opts, 'jpeg_quality', 80)))
+            pnginfo.add_text('as_l', str(getattr(shared.opts, 'webp_lossless', False)))
+            
             pnginfo.add_text(key_name, str(seed))
             pnginfo.add_text('e_info', orig_hash)
             params.update(pnginfo=pnginfo)
@@ -302,38 +333,65 @@ if getattr(PILImage.Image, '__name__', '') != 'AntiSeekImage':
                 except: 
                      image = generate_fake_image(image.width, image.height)
             
-            target_format = getattr(shared.opts, 'antiseek_preview_format', 'png').lower()
-            target_quality = int(getattr(shared.opts, 'antiseek_preview_quality', 90))
+            target_ext = getattr(shared.opts, 'samples_format', 'png')
+            if not target_ext: target_ext = 'png'
+            
+            pil_format = get_pil_format_from_ext(target_ext)
+            target_quality = int(getattr(shared.opts, 'jpeg_quality', 80))
+            target_lossless = getattr(shared.opts, 'webp_lossless', False)
+            
+            save_args = {}
 
-            if target_format == 'jpeg':
+            if pil_format == 'JPEG':
                 if image.mode in ('RGBA', 'LA'):
                     image = image.convert('RGB')
-                image.save(output_bytes, format="JPEG", quality=target_quality)
-            elif target_format == 'webp':
-                save_args = {"quality": target_quality}
-                if target_quality >= 100:
+                save_args['quality'] = target_quality
+                save_args['exif'] = get_exif_bytes(image.info)
+                
+            elif pil_format == 'WEBP':
+                save_args['quality'] = target_quality
+                if target_lossless:
                     save_args['lossless'] = True
-                image.save(output_bytes, format="WEBP", **save_args)
-            elif target_format == 'avif':
-                image.save(output_bytes, format="AVIF", quality=target_quality)
+                save_args['exif'] = get_exif_bytes(image.info)
+                
+            elif pil_format == 'AVIF':
+                save_args['quality'] = target_quality
+                save_args['exif'] = get_exif_bytes(image.info)
             else:
-                image.save(output_bytes, format="PNG", quality=opts.jpeg_quality)
-            
+                pil_format = 'PNG'
+
+            image.save(output_bytes, format=pil_format, **save_args)
             bytes_data = output_bytes.getvalue()
+            
         return base64.b64encode(bytes_data)
 
-    if piexif:
-        _original_piexif_insert = piexif.insert
-        
-        def _antiseek_piexif_insert(exif, image, **kwargs):
+    _original_piexif_insert = piexif.insert
+    
+    def _antiseek_piexif_insert(exif, image, **kwargs):
+        try:
+            _original_piexif_insert(exif, image, **kwargs)
+        except piexif.InvalidImageDataError:
             try:
-                _original_piexif_insert(exif, image, **kwargs)
-            except piexif.InvalidImageDataError:
+                if isinstance(image, str) and os.path.isfile(image):
+                    exif_dict = piexif.load(exif)
+                    user_comment = exif_dict.get("Exif", {}).get(piexif.ExifIFD.UserComment)
+                    
+                    if user_comment:
+                        parameters = piexif.helper.UserComment.load(user_comment)
+                        if parameters:
+                            with PILImage.open(image) as img_obj:
+                                info = PngImagePlugin.PngInfo()
+                                for k, v in (img_obj.info or {}).items():
+                                    info.add_text(k, str(v))
+                                info.add_text("parameters", parameters)
+                                
+                                img_obj.save(image, format="PNG", pnginfo=info)
+            except:
                 pass
-            except Exception:
-                raise
+        except Exception:
+            raise
 
-        piexif.insert = _antiseek_piexif_insert
+    piexif.insert = _antiseek_piexif_insert
 
     PILImage.Image = AntiSeekImage
     PILImage.open = open
